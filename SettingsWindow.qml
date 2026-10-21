@@ -1480,62 +1480,11 @@ Item {
               font.pixelSize: Style.font.caption
             }
 
-            // OmaSettings goes on as OmaControl. Said in the corner rather
-            // than over a page: it is about the window, not about any setting,
-            // and it is there every time, so it must not cost a page its top.
-            // The click installs OmaControl and opens it, where a button brings
-            // the settings across; this window cannot do that half, because the
-            // new one decides the shape it wants them in.
+            // The gap keeps the update from reading as part of the reset
+            // above it, so it is only there when both are showing.
             Item {
               Layout.preferredHeight: Style.space(6)
-              visible: root.changedSettings.length > 0 && !root.busy && root.loaded
-            }
-
-            // A layout rather than a Column, and the lines wrap: a Column
-            // takes its width from its longest line, and a line longer than
-            // the sidebar made the whole sidebar lay out at that width —
-            // search box and selected row ran past the divider into the page.
-            ColumnLayout {
-              Layout.fillWidth: true
-              visible: !root.busy && root.loaded
-              spacing: Style.space(2)
-
-              Text {
-                textFormat: Text.PlainText
-                Layout.fillWidth: true
-                wrapMode: Text.WordWrap
-                text: "\uf0aa  OmaSettings is now OmaControl"
-                color: root.accent
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-
-              Text {
-                textFormat: Text.PlainText
-                Layout.fillWidth: true
-                wrapMode: Text.WordWrap
-                text: "Install OmaControl · your settings come along"
-                color: successorMouse.containsMouse ? root.accent : root.muted
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                font.underline: successorMouse.containsMouse
-
-                MouseArea {
-                  id: successorMouse
-                  anchors.fill: parent
-                  anchors.margins: -Style.space(4)
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: root.run(["successor", "start"])
-                }
-              }
-            }
-
-            // Two unrelated notices, one under the other: the gap keeps the
-            // update from reading as part of the reset above it.
-            Item {
-              Layout.preferredHeight: Style.space(6)
-              visible: !root.busy && root.loaded && root.selfBehind > 0
+              visible: !root.busy && root.loaded && root.selfBehind > 0 && root.changedSettings.length > 0
             }
 
             ColumnLayout {
