@@ -86,6 +86,8 @@ Item {
 
   Component.onDestruction: {
     var nav = navController()
+    // A row rebuilt mid-edit must not leave its block behind on the window.
+    if (nav && nav.setNavBlocked !== undefined) nav.setNavBlocked(settingRow, false)
     if (nav) nav.unregisterNavRow(settingRow)
   }
   default property alias control: controlHolder.data

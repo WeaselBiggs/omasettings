@@ -49,25 +49,50 @@ device_config_settings() {
     # Our own generated file is not "theirs".
     [[ $file == "$MANAGED_LUA" ]] && continue
 
+    # A block may sit on one line — `hl.device({ name = "x", kb_layout = "se" })`,
+    # the shape Omarchy's own disabled-input-device.lua uses — or carry its
+    # name on the opening line, so the opening line is read for pairs like
+    # any other and a line may hold several. A pair ends at the next
+    # `, key =` rather than at every comma, since kb_options holds commas
+    # inside one quoted value.
     blocks=$(awk '
       function trim(v) { gsub(/^[ \t]+|[ \t,]+$/, "", v); return v }
-      /^[ \t]*--/ { next }
-      /hl\.device[ \t]*\(/ { inside = 1; name = ""; delete pairs; count = 0; next }
-      inside && /\}\)/ {
-        if (name != "") {
-          printf "%s", name
-          for (i = 1; i <= count; i++) printf "\t%s", pairs[i]
-          printf "\n"
+      function record(line,    rest, key, value) {
+        while (match(line, /[A-Za-z_]+[ \t]*=/)) {
+          key = trim(substr(line, RSTART, RLENGTH - 1))
+          rest = substr(line, RSTART + RLENGTH)
+          if (match(rest, /,[ \t]*[A-Za-z_]+[ \t]*=/)) {
+            value = substr(rest, 1, RSTART - 1)
+            line = substr(rest, RSTART + 1)
+          } else {
+            value = rest
+            line = ""
+          }
+          value = trim(value)
+          gsub(/^"|"$/, "", value)
+          if (key == "name") name = value
+          else if (key != "") pairs[++count] = key "=" value
         }
-        inside = 0
-        next
       }
-      inside && /=/ {
-        key = trim(substr($0, 1, index($0, "=") - 1))
-        value = trim(substr($0, index($0, "=") + 1))
-        gsub(/^"|"$/, "", value)
-        if (key == "name") name = value
-        else if (key != "") pairs[++count] = key "=" value
+      /^[ \t]*--/ { next }
+      /hl\.device[ \t]*\(/ {
+        inside = 1; name = ""; delete pairs; count = 0
+        sub(/.*hl\.device[ \t]*\([ \t]*\{?/, "", $0)
+      }
+      inside {
+        # A trailing Lua comment is not part of the value.
+        sub(/[ \t]*--.*$/, "", $0)
+        closes = ($0 ~ /\}\)/)
+        if (closes) sub(/\}\).*$/, "", $0)
+        record($0)
+        if (closes) {
+          if (name != "") {
+            printf "%s", name
+            for (i = 1; i <= count; i++) printf "\t%s", pairs[i]
+            printf "\n"
+          }
+          inside = 0
+        }
       }
     ' <(read_file "$file") | jq -R -s -c --argjson blocks "$blocks" 'split("\n")
       | map(select(length > 0) | split("\t")
@@ -104,7 +129,8 @@ devices_state() {
     --argjson monitors "${monitors:-[]}" '
     def uninteresting:
       . as $name
-      | test("^(power-button|video-bus|sleep-button|lid-switch|hl-virtual.*|.*-wireless-radio-control|.*-consumer-control.*)$")
+      # Numbered siblings included: a second power button is "power-button-1".
+      | test("^(power-button|video-bus|sleep-button|lid-switch)(-[0-9]+)?$|^hl-virtual.*|.*-wireless-radio-control$|.*-consumer-control.*|.*-wmi-hotkeys(-[0-9]+)?$")
         # Display connectors, named the way DRM names them, plus the numbered
         # siblings Hyprland derives from them. Matched by shape rather than
         # against the connected monitors, since an unplugged display leaves
@@ -132,14 +158,24 @@ devices_state() {
             settings: (($store.devices // {})[.name] // {}),
             configured: ($configured[.name] // {}) } ] }
     # A device that is configured but unplugged still belongs in the list: a
-    # mouse does not stop being yours when you undock.
+    # mouse does not stop being yours when you undock. Nothing says what kind
+    # it was, so the keys set for it do: one holding a layout or a repeat
+    # rate goes back to the Keyboard page rather than being offered a
+    # sensitivity on the Mouse page.
     | . as $live
     | ($live.keyboards + $live.pointers | map(.name)) as $present
-    | .pointers = (.pointers + [ (($store.devices // {}) + $configured) | to_entries[]
+    | ([ (($store.devices // {}) + $configured) | to_entries[]
         | select([.key] | inside($present) | not)
-        | { name: .key, kind: "pointer", touchpad: false, connected: false,
+        | { name: .key, connected: false,
             settings: (($store.devices // {})[.key] // {}),
-            configured: ($configured[.key] // {}) } ])
+            configured: ($configured[.key] // {}) }
+        | .keyboardish = ((.settings + .configured) | keys
+            | any(. as $k | ["kb_layout", "kb_variant", "kb_options", "repeat_rate",
+                             "repeat_delay", "numlock_by_default"] | index($k) != null)) ]) as $absent
+    | .keyboards = (.keyboards + [ $absent[] | select(.keyboardish)
+        | { name, kind: "keyboard", main: false, layout: "", connected, settings, configured } ])
+    | .pointers = (.pointers + [ $absent[] | select(.keyboardish | not)
+        | { name, kind: "pointer", touchpad: false, connected, settings, configured } ])
   ' <<<"$raw"
 }
 

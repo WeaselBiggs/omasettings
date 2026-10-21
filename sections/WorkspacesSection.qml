@@ -86,6 +86,12 @@ Ui.SectionBody {
 
       width: parent.width
       title: name
+      // An off here deletes our field rather than writing false, so it cannot
+      // undo a line they wrote; the reader needs to know why the switch snaps
+      // back.
+      note: theirs && !ours
+        ? "Set in your own Hyprland config. Turning a setting off here cannot override that line; Remove comments it out."
+        : ""
 
       Ui.PickerRow {
         label: "Opens on"

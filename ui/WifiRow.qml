@@ -28,6 +28,27 @@ Item {
   // A saved network has its password already; only a new secured one needs asking.
   readonly property bool needsPassword: wifiRow.secured && !wifiRow.saved
 
+  // The prompt takes the keyboard when it opens and hands it back when it
+  // closes: nothing else focuses the field, so a keyboard user would open a
+  // prompt they could not type into, and focus left on the hidden field
+  // afterwards is focus the navigation keys never see.
+  onPromptingChanged: {
+    if (prompting) passwordField.forceActiveFocus()
+    else if (nav.navController && nav.navController.navTakeFocus !== undefined) nav.navController.navTakeFocus()
+  }
+  // The list is rebuilt on every poll, so a row born with its prompt open
+  // (its predecessor had it) must take the keyboard the same way.
+  Component.onCompleted: if (prompting) passwordField.forceActiveFocus()
+
+  // One door for Enter and the button. The passphrase is cleared on the way
+  // out so it does not sit in the row after the connect.
+  function submitPassword() {
+    var secret = passwordField.text
+    if (secret === "") return
+    passwordField.text = ""
+    wifiRow.connectRequested(secret)
+  }
+
   Local.NavCursor {
     id: nav
     anchors.fill: parent
@@ -190,7 +211,18 @@ Item {
         password: true
         foreground: Local.Palette.foreground
         accent: Local.Palette.accent
-        onAccepted: if (text !== "") wifiRow.connectRequested(text)
+        // Handled and stopped here: the field accepts neither key, so an
+        // Escape left to bubble closes the window and an Enter re-activates
+        // the row and reopens the prompt it just sent.
+        Keys.onPressed: function(event) {
+          if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+            wifiRow.submitPassword()
+            event.accepted = true
+          } else if (event.key === Qt.Key_Escape) {
+            wifiRow.promptToggled()
+            event.accepted = true
+          }
+        }
       }
 
       Button {
@@ -201,7 +233,7 @@ Item {
         foreground: Local.Palette.foreground
         accent: Local.Palette.accent
         fontFamily: Local.Palette.fontFamily
-        onClicked: if (passwordField.text !== "") wifiRow.connectRequested(passwordField.text)
+        onClicked: wifiRow.submitPassword()
       }
     }
   }

@@ -55,10 +55,19 @@ MONITOR_SCHEMA=3
 # description of whatever is in that connector now — the best guess there is,
 # and the same one the user was making when they set it.
 monitor_migrate() {
-  local schema
-  schema=$(jq -r '(.monitorsSchema // 0)' <<<"$(read_store)")
+  local schema store
+  store=$(read_store)
+  schema=$(jq -r '(.monitorsSchema // 0)' <<<"$store")
   [[ $schema =~ ^[0-9]+$ ]] || schema=0
   ((schema >= MONITOR_SCHEMA)) && return 0
+
+  # A store with no display in it has nothing to migrate, and is not written:
+  # every store write re-renders the managed file and appends the require line
+  # to hyprland.lua, which a fresh install's first look at the page must not
+  # do — and a store read that came back empty must not be rewritten from `{}`.
+  # The writers stamp the schema themselves when the first entry appears.
+  jq -e '((.monitors // {}) | length) > 0
+    or ((.written // {}) | keys | any(startswith("monitor:")))' <<<"$store" >/dev/null || return 0
 
   # On a .conf setup the keyword worked, so those entries are real settings and
   # not fiction — they are kept, and only the flag is written.
@@ -76,11 +85,28 @@ monitor_migrate() {
 # the displays plugged in right now can be re-keyed: nothing else says what was
 # ever in that socket. An entry for a display that is not here keeps its
 # connector key and goes on working as one.
+#
+# This runs on every read as well as before every write, because a display
+# set up by connector name before it was plugged in is only re-keyed once it
+# arrives — so the store is touched only when an entry actually names a
+# connector that is here now. A store write re-renders the managed file, which
+# Hyprland watches and reloads on, so a rekey of nothing would reload the
+# compositor on every page open.
+#
+# $1 is the live list when the caller already has it.
 monitor_rekey_to_description() {
-  local map
+  local live=${1:-} map
+  [[ -n $live ]] || live=$(monitor_live)
   map=$(jq -c '
-    map(select(.key != .name)) | map({ (.name): .key }) | add // {}' <<<"$(monitor_live)")
+    map(select(.key != .name)) | map({ (.name): .key }) | add // {}' <<<"$live")
   [[ -z $map || $map == "{}" ]] && return 0
+
+  jq -e --argjson map "$map" '
+    def display: (ltrimstr("monitor:") | split(":")) as $parts
+      | (if ($parts | length) >= 2 then $parts[:-1] else $parts end) | join(":");
+    ((.monitors // {}) | keys | any(. as $k | $map | has($k)))
+    or ((.written // {}) | keys | any(startswith("monitor:") and (display as $k | $map | has($k))))' \
+    <<<"$(read_store)" >/dev/null || return 0
 
   edit_store '
     def rekey($k): $map[$k] // $k;
@@ -180,8 +206,12 @@ monitor_output_name() {
 # Their output string is put through monitor_key, so a rule they wrote against
 # DP-2 and one this window wrote against the description of the screen in DP-2
 # are recognised as being about the same display.
+#
+# Position and transform are read as well as mode and scale: our rule replaces
+# theirs whole (see monitor_set), so what they wrote for either has to ride
+# along in ours or a portrait display is un-rotated by a change of scale.
 monitor_config_settings() {
-  local file line name mode scale live out='{}'
+  local file line name mode scale position transform live out='{}'
   live=$(monitor_live)
   while IFS= read -r line; do
     name=$(sed -nE 's/.*output *= *"([^"]+)".*/\1/p' <<<"$line")
@@ -189,10 +219,14 @@ monitor_config_settings() {
     name=$(monitor_key "$name" "$live")
     mode=$(sed -nE 's/.*mode *= *"([^"]+)".*/\1/p' <<<"$line")
     scale=$(sed -nE 's/.*scale *= *([0-9]+(\.[0-9]+)?).*/\1/p' <<<"$line")
-    out=$(jq -c --arg n "$name" --arg m "$mode" --arg s "$scale" \
+    position=$(sed -nE 's/.*position *= *"([^"]+)".*/\1/p' <<<"$line")
+    transform=$(sed -nE 's/.*transform *= *([0-9]+).*/\1/p' <<<"$line")
+    out=$(jq -c --arg n "$name" --arg m "$mode" --arg s "$scale" --arg p "$position" --arg t "$transform" \
       '.[$n] = ((.[$n] // {})
         | (if $m == "" then . else .mode = $m end)
-        | (if $s == "" then . else .scale = ($s | tonumber) end))' <<<"$out")
+        | (if $s == "" then . else .scale = ($s | tonumber) end)
+        | (if $p == "" then . else .position = $p end)
+        | (if $t == "" then . else .transform = ($t | tonumber) end))' <<<"$out")
   done < <(for file in "$HYPR_DIR"/*.lua; do
              [[ -f $file ]] || continue
              [[ $file == "$MANAGED_LUA" ]] && continue
@@ -209,10 +243,16 @@ monitor_config_settings() {
 # `name` is the key — it is what a setting key is built from, so the page keeps
 # calling it the display's name. `label` is what to put on the group, since
 # "desc:Dell Inc. DELL U2724D 1A2B3C4" is an identity and not a title.
+#
+# A read, so nothing here writes the store or the managed file — except the
+# one re-keying a display set up by connector name needs the moment it is
+# first seen, which monitor_rekey_to_description does only then.
 monitor_state() {
-  monitor_migrate
+  local live
+  live=$(monitor_live)
+  monitor_rekey_to_description "$live"
   jq -c -n \
-    --argjson live "$(monitor_live)" \
+    --argjson live "$live" \
     --argjson stored "$(jq -c '.monitors // {}' <<<"$(read_store)")" \
     --argjson configured "$(monitor_config_settings)" '
     def entry($name; $live):
@@ -288,9 +328,19 @@ monitor_set() {
   local name=$1 field=$2 value=$3 json
   [[ -n $name ]] || die "no display given"
   monitor_migrate
+  monitor_rekey_to_description
   # Whatever the caller named the display, the store speaks keys: a rule filed
   # under DP-2 would be handed to the next screen in that socket.
   name=$(monitor_key "$name")
+
+  # The way back for this field, read before the write: what it was before
+  # this window first touched it, else what the display is doing now. A value
+  # that lands back on it is not a change, and must leave no rule behind.
+  local original
+  original=$(jq -r --arg k "monitor:$name:$field" \
+    '(.written // {}) | if has($k) then .[$k] | tostring else empty end' <<<"$(read_store)")
+  local recorded=$original
+  [[ -n $original ]] || original=$(monitor_value_now "$name" "$field")
 
   case $field in
     mode)
@@ -304,15 +354,25 @@ monitor_set() {
     *) die "unknown display setting '$field'" ;;
   esac
 
+  # Setting a display to what it already does, with nothing recorded against
+  # it, is not a change: there is nothing to write and no rule to leave.
+  [[ -z $recorded && -n $original && $value == "$original" ]] && return 0
+
   # A monitor rule is not merged with the ones before it: ours is more specific
   # than Omarchy's `output = ""` and loads last, so it replaces that rule whole.
   # Sending a mode on its own therefore took the scale with it — DP-2 dropped to
   # 1.0 the moment a resolution was picked. Whatever the user did not set is
-  # filled in with what the display is doing now, so the rule says all of it.
+  # filled in with what the display is doing now, so the rule says all of it —
+  # and with the position and transform their own line gives it, which the
+  # display does not report in a shape a rule can take back. Their `auto`
+  # stays `auto` that way, rather than being pinned to wherever it landed.
   edit_store '.monitors = ((.monitors // {})
-    | .[$n] = ($now + (.[$n] // {}) + { ($f): $v }))' \
+    | .[$n] = ($theirs + $now + (.[$n] // {}) + { ($f): $v }))
+    | .monitorsSchema = $schema' \
     --arg n "$name" --arg f "$field" --argjson v "$json" \
-    --argjson now "$(monitor_in_force "$name")"
+    --argjson now "$(monitor_in_force "$name")" \
+    --argjson theirs "$(monitor_config_placement "$name")" \
+    --argjson schema "$MONITOR_SCHEMA"
   monitor_apply_live "$name"
 
   # Hyprland takes a scale it cannot do exactly, snaps to the nearest one that
@@ -327,17 +387,51 @@ monitor_set() {
 
   [[ $field == scale ]] && monitor_is_internal "$name" \
     && monitor_lua_scale "$name" "$(monitor_settings "$name" | jq -r '.scale')"
+
+  # Slid back to where it started: set_key clears the change mark, and the
+  # rule has to go with it, or one saying what the display already does would
+  # go on overriding a mode their config — or the display's own EDID — changes
+  # later. Which door is the same choice a reset makes: the rule stays whole
+  # while another change is recorded against the display, and goes with the
+  # last one. After the monitors.lua write above, so the panel's own line
+  # already says the original by the time the marked block is taken out.
+  #
+  # The record itself is left: set_key clears it after this returns, and
+  # reads it to see that the value is back — taken away here, it would be
+  # written again with the value just left as the original.
+  if [[ -n $original && $(monitor_settings "$name" | jq -r --arg f "$field" '.[$f] | tostring') == "$original" ]]; then
+    if jq -e --arg n "$name" --arg k "monitor:$name:$field" \
+         '(.written // {}) | keys | any(startswith("monitor:" + $n + ":") and . != $k)' \
+         <<<"$(read_store)" >/dev/null; then
+      monitor_unset "$name" "$field"
+    else
+      edit_store '.monitors = ((.monitors // {}) | del(.[$n]))' --arg n "$name"
+      monitor_is_internal "$name" && monitor_lua_scale "$name" --
+      hyprctl reload >/dev/null 2>&1 || true
+    fi
+  fi
   return 0
 }
 
-# What a display is running, in the shape a rule takes. No position: Omarchy's
-# own rule places every display with `position = "auto"`, so leaving it out is
-# what keeps the arrangement it already had.
+# What a display is running, in the shape a rule takes. Transform rides along
+# when it is anything but the default, since a rule without it un-rotates a
+# portrait display. No position: Omarchy's own rule places every display with
+# `position = "auto"`, so leaving it out is what keeps the arrangement it
+# already had — unless their own line says otherwise, see
+# monitor_config_placement.
 monitor_in_force() {
   local found
   found=$(monitor_find "$1")
   [[ $found == null ]] && { echo '{}'; return 0; }
-  jq -c '{ mode: .mode, scale: .scale }' <<<"$found"
+  jq -c '{ mode: .mode, scale: .scale }
+    + (if (.transform // 0) != 0 then { transform: .transform } else {} end)' <<<"$found"
+}
+
+# The position and transform their own hl.monitor line gives a display, and
+# nothing else: these are merged into our rule only when they wrote one.
+monitor_config_placement() {
+  monitor_config_settings | jq -c --arg n "$1" \
+    '(.[$n] // {}) | with_entries(select(.key == "position" or .key == "transform"))'
 }
 
 # Putting one back writes the value the display had and then drops the rule:
@@ -346,6 +440,7 @@ monitor_in_force() {
 # or the display's own EDID — changes later.
 monitor_unset() {
   local name=$1 field=$2 now
+  monitor_rekey_to_description
   name=$(monitor_key "$name")
   # What is left has to be a whole rule, and in one write: Hyprland reloads a
   # config file the moment it changes, so a partial rule on disk is applied
@@ -354,9 +449,10 @@ monitor_unset() {
   # the user is dropping is replaced by it rather than deleted.
   now=$(monitor_in_force "$name")
   edit_store '.monitors = ((.monitors // {})
-    | .[$n] = ($now + ((.[$n] // {}) | del(.[$f])))
+    | .[$n] = ($theirs + $now + ((.[$n] // {}) | del(.[$f])))
     | with_entries(select(.value != {})))' \
-    --arg n "$name" --arg f "$field" --argjson now "$now"
+    --arg n "$name" --arg f "$field" --argjson now "$now" \
+    --argjson theirs "$(monitor_config_placement "$name")"
   monitor_apply_live "$name"
   [[ $field == scale ]] && monitor_is_internal "$name" && monitor_lua_scale "$name" --
   return 0
@@ -489,6 +585,7 @@ monitor_lua_scale() {
 monitor_remember() {
   local given=$1 name
   monitor_migrate
+  monitor_rekey_to_description
   [[ -n $given ]] || die "no display given"
 
   if [[ $given =~ $MONITOR_NAME_RE ]]; then
@@ -500,8 +597,9 @@ monitor_remember() {
     name=$(monitor_key "desc:$desc")
   fi
 
-  edit_store '.monitors = ((.monitors // {}) | (if has($n) then . else .[$n] = {} end))' \
-    --arg n "$name"
+  edit_store '.monitors = ((.monitors // {}) | (if has($n) then . else .[$n] = {} end))
+    | .monitorsSchema = $schema' \
+    --arg n "$name" --argjson schema "$MONITOR_SCHEMA"
 }
 
 # Handing a display back: our rule goes, and the reload is what makes their
@@ -509,10 +607,20 @@ monitor_remember() {
 monitor_forget() {
   local name=$1
   [[ -n $name ]] || die "no display given"
+  monitor_rekey_to_description
   # Only a key that is actually in the store is resolved: forgetting must be
   # able to reach an entry whose display is long gone.
   jq -e --arg n "$name" '(.monitors // {}) | has($n)' <<<"$(read_store)" >/dev/null \
     || name=$(monitor_key "$name")
+  # The panel's own monitors.lua line had its scale replaced in place, and
+  # monitor_lua_scale's `--` leaves a line they wrote alone on the assumption
+  # that the scale in it is already the original. A reset wrote it back before
+  # getting here; the Forget button did not, so it is written back now, while
+  # the record still says what it was.
+  local original
+  original=$(jq -r --arg k "monitor:$name:scale" \
+    '(.written // {}) | if has($k) then .[$k] | tostring else empty end' <<<"$(read_store)")
+  [[ -n $original ]] && monitor_is_internal "$name" && monitor_lua_scale "$name" "$original"
   edit_store '.monitors = ((.monitors // {}) | del(.[$n]))
     | if .written then .written |= with_entries(select(.key | startswith("monitor:" + $n + ":") | not)) else . end' \
     --arg n "$name"

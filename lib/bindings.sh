@@ -14,8 +14,10 @@ BINDINGS_END="-- <<< omasettings bindings"
 
 # Normalised so "super+shift+r", "SUPER + SHIFT + R" and "Super Shift R" are
 # one binding rather than three.
+# The code:/mouse: prefixes and mouse_up/mouse_down are not keysyms: Hyprland
+# matches them literally, so they go back to lower case after the modifiers.
 keys_normalise() {
-  tr 'a-z' 'A-Z' <<<"$1" | sed -E 's/[[:space:]]*\+[[:space:]]*/ + /g; s/[[:space:]]+/ + /g; s/(\+ ){2,}/+ /g; s/^ *| *$//g'
+  tr 'a-z' 'A-Z' <<<"$1" | sed -E 's/[[:space:]]*\+[[:space:]]*/ + /g; s/[[:space:]]+/ + /g; s/(\+ ){2,}/+ /g; s/^ *| *$//g; s/\b(CODE|MOUSE):/\L\1:/g; s/\bMOUSE_(UP|DOWN)\b/\L&/g'
 }
 
 bindings_store() { read_store | jq -c '.bindings // {added: [], disabled: []}'; }

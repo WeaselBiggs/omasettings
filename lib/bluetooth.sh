@@ -35,10 +35,14 @@ bluetooth_state() {
   paired=$(bt_addresses Paired | cut -f1 | jq -R -s -c 'split("\n") | map(select(length > 0))')
   connected=$(bt_addresses Connected | cut -f1 | jq -R -s -c 'split("\n") | map(select(length > 0))')
 
-  local enriched='[]' address icon battery
+  local enriched='[]' address details icon battery
   while read -r address; do
     [[ -n $address ]] || continue
-    IFS=$'\t' read -r icon battery < <(bt_details "$address")
+    # Split by hand: `read` drops a leading tab as whitespace, so a device
+    # with no icon would have its battery read as the icon.
+    details=$(bt_details "$address")
+    icon=${details%%$'\t'*}
+    battery=${details#*$'\t'}
     enriched=$(jq -c --arg address "$address" --arg icon "${icon:-}" --arg battery "${battery:-}" \
       '. + [{ address: $address, icon: $icon, battery: (($battery | tonumber?) // null) }]' <<<"$enriched")
   done < <(jq -r -s 'add | unique | .[]' <<<"${paired:-[]} ${connected:-[]}")

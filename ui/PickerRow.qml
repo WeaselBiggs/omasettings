@@ -49,18 +49,34 @@ SettingRow {
   Component {
     id: plainComponent
     Dropdown {
+      id: plainDrop
       width: parent ? parent.width : 0
       showLabel: false
       fontFamily: Local.Palette.fontFamily
       value: pickerRow.value
       options: pickerRow.normalized
       onChanged: function(next) { pickerRow.picked(next) }
+      // The kit assigns `value` on a pick, which drops the binding above, so
+      // from then on the row is resynced by hand: when the value moves (a
+      // reset, a change made elsewhere) and when a write finishes without
+      // moving it (a refused pick). Not re-bound on the pick itself: that
+      // snaps the control back to the old value for as long as the apply
+      // takes, seconds for a theme.
+      Connections {
+        target: pickerRow
+        function onValueChanged() { plainDrop.value = pickerRow.value }
+      }
+      Connections {
+        target: pickerRow.nav
+        function onBusyChanged() { if (pickerRow.nav && !pickerRow.nav.busy) plainDrop.value = pickerRow.value }
+      }
     }
   }
 
   Component {
     id: searchableComponent
     SearchableDropdown {
+      id: searchDrop
       width: parent ? parent.width : 0
       showLabel: false
       fontFamily: Local.Palette.fontFamily
@@ -68,6 +84,15 @@ SettingRow {
       value: pickerRow.value
       options: pickerRow.normalized
       onChanged: function(next) { pickerRow.picked(next) }
+      // Same resync as the plain dropdown above, for the same reason.
+      Connections {
+        target: pickerRow
+        function onValueChanged() { searchDrop.value = pickerRow.value }
+      }
+      Connections {
+        target: pickerRow.nav
+        function onBusyChanged() { if (pickerRow.nav && !pickerRow.nav.busy) searchDrop.value = pickerRow.value }
+      }
     }
   }
 }

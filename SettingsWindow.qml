@@ -738,8 +738,23 @@ Item {
 
   // Every mutation is the same shape: hand the helper a command, then re-read
   // the world once it settles rather than guessing what changed.
+  //
+  // One process, so a command issued while the last is still running waits
+  // its turn. The Process ignores `running = true` while it is running and a
+  // `command` assigned mid-run only names the next launch, so without the
+  // queue the second of two quick presses on a slider, or a switch flipped
+  // while a theme was still applying, simply never ran — and the stepping
+  // rows sprang back to the value before it.
+  property var runQueue: []
+
   function run(args) {
     root.busy = true
+    if (applyProc.running) {
+      var q = root.runQueue.slice()
+      q.push(args)
+      root.runQueue = q
+      return
+    }
     root.lastArgs = args
     applyProc.command = ["bash", root.helperPath].concat(args)
     applyProc.running = true
@@ -879,7 +894,11 @@ Item {
       onStreamFinished: root.lastError = text.trim()
     }
     onRunningChanged: if (!running) {
-      root.busy = false
+      // A full read that left before this write lands after it carrying the
+      // values from before, over the slice read below — and for a command
+      // whose slice is the whole story nothing would read again. Owing one
+      // makes sure the last read to land is one that left after the write.
+      if (stateProc.running) root.refreshOwed = true
       // What the change was about, answered now; everything else a beat
       // later. The wait used to come first, so a click that had already
       // landed sat there for 400ms before the window even asked what it did.
@@ -891,6 +910,13 @@ Item {
       // and landing after a second click it put the older value back on
       // screen until its own settle read corrected it.
       if (!root.slicesSuffice(root.lastArgs)) settleTimer.restart()
+      if (root.runQueue.length > 0) {
+        var next = root.runQueue[0]
+        root.runQueue = root.runQueue.slice(1)
+        root.run(next)
+        return
+      }
+      root.busy = false
     }
   }
 

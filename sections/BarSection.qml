@@ -289,7 +289,10 @@ Ui.SectionBody {
             Button {
               anchors.verticalCenter: parent.verticalCenter
               visible: !widgetRow.isSpacer && !widgetRow.choosing
-              text: "Disable"
+              // This window's own row takes only the gear out of the bar;
+              // the service, the hotkey and the launcher entry stay, so the
+              // button must not promise more than that.
+              text: String(widgetRow.modelData) === page.app.selfId ? "Hide gear" : "Disable"
               bordered: true
               foreground: Ui.Palette.foreground
               accent: Ui.Palette.accent

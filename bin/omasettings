@@ -96,4 +96,6 @@ USAGE
 esac
 }
 
-main "$@" | head -c "$OMASETTINGS_READ_MAX"
+# Unbuffered, or the watchers' events sit in head's stdio buffer until 4 KiB
+# of them have piled up, and the Audio and Power pages move several events late.
+main "$@" | stdbuf -o0 head -c "$OMASETTINGS_READ_MAX"

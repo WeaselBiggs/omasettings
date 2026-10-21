@@ -282,31 +282,61 @@ workspace_setup_set() {
   hyprctl reload >/dev/null 2>&1 || true
 }
 
+# One of their Lua files with a line commented out, as the awk arguments say.
+# Nothing is written here: the result is checked with `luac -p` first and
+# handed back to be written once every file a remove touches has passed, so
+# "nothing changed" is true when it is said — a file that is half commented
+# out and a store already emptied is what the write-then-check order left
+# behind. The backup comes first for the same reason: a file that cannot be
+# copied is not edited either.
+#
+# Stdout carries the new content with its last newline intact (the caller
+# captures it with a sentinel), and an edit that leaves the file as it was
+# prints nothing.
+workspace_edit_theirs() {
+  local file=$1 previous next
+  shift
+  backup_once "$file" || die "could not back up $(basename "$file"), so nothing changed"
+  previous=$(read_file "$file" && printf x) || die "could not read $(basename "$file"), so nothing changed"
+  # Piped, not a here-string: a here-string puts a newline after the content,
+  # which awk would print as one more empty line at the end of every edit.
+  next=$(printf '%s' "${previous%x}" | awk "$@" && printf x) || die "could not edit $(basename "$file"), so nothing changed"
+  [[ ${#next} -gt 1 ]] || die "could not edit $(basename "$file"), so nothing changed"
+  [[ $next == "$previous" ]] && return 0
+  printf '%s' "${next%x}" | luac -p - >/dev/null 2>&1 \
+    || die "removing that rule would have broken $(basename "$file"), so nothing changed"
+  printf '%s' "${next%x}"
+}
+
 # Ours goes; a line they wrote is commented out in place, as a window rule is.
+# Their files first and the store last, so a refused edit leaves everything
+# as it was.
 workspace_setup_remove() {
-  local id=$1 file previous
+  local id=$1 file next files=() nexts=() i
   [[ $id =~ ^[0-9]+$ ]] || die "'$id' is not a workspace number"
-  edit_store '.workspaceRules = ((.workspaceRules // {}) | del(.[$i]))' --arg i "$id"
 
   for file in "$HYPR_DIR"/*.lua; do
     [[ -f $file ]] || continue
     [[ $file == "$MANAGED_LUA" ]] && continue
-    read_file "$file" | grep -qE "^[[:space:]]*hl\.workspace_rule\([[:space:]]*\{[[:space:]]*workspace *= *\"$id\"" || continue
-    previous=$(read_file "$file")
-    backup_once "$file"
-    awk -v id="$id" '
+    # `workspace` can sit anywhere in the table, as the reader allows.
+    read_file "$file" | grep -qE "^[[:space:]]*hl\.workspace_rule\(.*[{,][[:space:]]*workspace *= *\"$id\"" || continue
+    next=$(workspace_edit_theirs "$file" -v id="$id" '
       $0 ~ /^[ \t]*hl\.workspace_rule\(/ && $0 ~ ("workspace *= *\"" id "\"") {
         print "-- " $0
         print "-- ^ removed in OmaSettings; delete the dashes to bring it back."
         next
       }
       { print }
-    ' <(read_file "$file") | write_file "$file" managed
-    if ! capture luac -p "$file" >/dev/null; then
-      printf '%s' "$previous" | write_file "$file" managed
-      die "removing that rule would have broken $(basename "$file"), so nothing changed"
-    fi
+    ' && printf x) || exit 1
+    [[ ${#next} -gt 1 ]] || continue
+    files+=("$file"); nexts+=("${next%x}")
   done
+  for i in "${!files[@]}"; do
+    printf '%s' "${nexts[i]}" | write_file "${files[i]}" managed \
+      || die "could not write $(basename "${files[i]}")"
+  done
+
+  edit_store '.workspaceRules = ((.workspaceRules // {}) | del(.[$i]))' --arg i "$id"
   hyprctl reload >/dev/null 2>&1 || true
 }
 
@@ -369,7 +399,7 @@ workspace_set() {
         fullscreen) json='{"fullscreen":true}' ;;
         *) die "'$value' is not tiled, floating or fullscreen" ;;
       esac
-      workspace_write "$class" '.[$c] = ((.[$c] // {}) | del(.float) | del(.fullscreen) + $v
+      workspace_write "$class" shown '.[$c] = ((.[$c] // {}) | del(.float) | del(.fullscreen) + $v
         | if .float != true then del(.pin) | del(.placement) | del(.width) | del(.height) | del(.center) else . end)' --argjson v "$json"
       return 0 ;;
     *) die "unknown window setting '$field'" ;;
@@ -383,7 +413,7 @@ workspace_set() {
   # Pinning and placement only mean anything floating; a window that stops
   # floating stops carrying them rather than keeping a promise Hyprland will
   # ignore.
-  workspace_write "$class" '.[$c] = ((.[$c] // {})
+  workspace_write "$class" "$field" '.[$c] = ((.[$c] // {})
         | if $v == "" or $v == false then del(.[$f]) else .[$f] = $v end
         | if $v == true and $f == "float" then del(.fullscreen)
           elif $v == true and $f == "fullscreen" then del(.float) else . end
@@ -397,13 +427,13 @@ workspace_set() {
 # value it already had is not a reason to re-run the whole config — and the
 # open windows are brought in line either way.
 workspace_write() {
-  local class=$1 filter=$2 before after
-  shift 2
+  local class=$1 field=$2 filter=$3 before after
+  shift 3
   before=$(md5sum <"$MANAGED_LUA" 2>/dev/null)
   edit_store ".windowRules = ((.windowRules // {}) | $filter)" --arg c "$class" "$@"
   after=$(md5sum <"$MANAGED_LUA" 2>/dev/null)
   [[ $before != "$after" ]] && { hyprctl reload >/dev/null 2>&1 || true; }
-  workspace_apply_live "$class"
+  workspace_apply_live "$class" "$field"
 }
 
 # A window rule applies to windows that open from now on. The ones already
@@ -415,24 +445,36 @@ workspace_write() {
 # Through `hyprctl eval`, not `hyprctl dispatch`: on a Lua config the latter
 # parses its argument as Lua, so the old `movetoworkspacesilent 7,class:...`
 # form fails — and did so silently here for a while.
+#
+# $2 is the field just edited. How a window shows is only touched when that
+# was the edit, or when our rule actually says something about it: a missing
+# float or fullscreen means "no rule", not "tiled", so putting every window
+# of the class back to tiled and windowed on a change to idle inhibit
+# un-floated the ones their own config floats and dropped a video out of
+# fullscreen.
 workspace_apply_live() {
-  local class=$1 rule ws float fullscreen addr floating lua
+  local class=$1 field=${2:-} rule ws float fullscreen addr floating lua layout=0
   rule=$(jq -c --arg c "$class" '(.windowRules // {})[$c] // {}' <<<"$(read_store)")
   ws=$(jq -r '.workspace // ""' <<<"$rule")
   float=$(jq -r '.float // false' <<<"$rule")
   fullscreen=$(jq -r '.fullscreen // false' <<<"$rule")
+  [[ $field == shown || $field == float || $field == fullscreen ]] && layout=1
+  jq -e 'has("float") or has("fullscreen")' <<<"$rule" >/dev/null && layout=1
 
   while IFS=$'\t' read -r addr floating; do
     [[ -n $addr ]] || continue
     lua="local w = 'address:$addr'"
-    # Fullscreen mode 2 is what the rule gives a window; 0 takes it back.
-    lua+="; hl.dispatch(hl.dsp.window.fullscreen_state({ internal = $([[ $fullscreen == true ]] && echo 2 || echo 0), client = 0, window = w }))"
-    # The float dispatcher toggles whatever it is told — every key tried
-    # (action, state, mode, floating) flipped the window — so it is sent only
-    # to a window that is on the wrong side.
-    [[ $floating != "$float" ]] && lua+="; hl.dispatch(hl.dsp.window.float({ window = w }))"
+    if ((layout)); then
+      # Fullscreen mode 2 is what the rule gives a window; 0 takes it back.
+      lua+="; hl.dispatch(hl.dsp.window.fullscreen_state({ internal = $([[ $fullscreen == true ]] && echo 2 || echo 0), client = 0, window = w }))"
+      # The float dispatcher toggles whatever it is told — every key tried
+      # (action, state, mode, floating) flipped the window — so it is sent only
+      # to a window that is on the wrong side.
+      [[ $floating != "$float" ]] && lua+="; hl.dispatch(hl.dsp.window.float({ window = w }))"
+    fi
     # A workspace is only a place to go; "wherever it was" moves nothing.
     [[ -n $ws ]] && lua+="; hl.dispatch(hl.dsp.window.move({ workspace = '$ws', follow = false, window = w }))"
+    [[ $lua == *hl.dispatch* ]] || continue
     hyprctl eval "$lua" >/dev/null 2>&1 </dev/null || true
   done < <(capture hyprctl -j clients \
            | jq -r --arg c "$class" '.[] | select(.class == $c) | "\(.address)\t\(.floating)"' 2>/dev/null)
@@ -444,38 +486,49 @@ workspace_apply_live() {
 # it is their config, and a rule that turns out to have been wanted should be
 # recoverable by deleting two dashes rather than from a backup. Only the
 # single-line `o.window("<class>", { ... })` form is touched — the same one
-# that is read — and the file is checked with `luac -p` afterwards and put
-# back if the edit broke it.
+# that is read — and the file is checked with `luac -p` before it is written,
+# with the store emptied only once every file has taken the edit.
+#
+# Only a line the page showed as theirs is touched: the reader keeps a rule
+# for the class only when it carries a field this page has, so their opacity
+# or tag rule for the same class — which the Effects page owns and this one
+# never listed — is not what Remove is removing. The same test is made line
+# by line, since a class can have one line for each.
 workspace_remove() {
-  local class=$1 file previous desktop
+  local class=$1 file next desktop rule=0 start=0 pattern files=() nexts=() i
   [[ -n $class ]] || die "no application given"
   desktop=$(workspace_apps | jq -r --arg c "$class" 'map(select(.class == $c)) | first | .desktop // ""')
-  edit_store '.windowRules = ((.windowRules // {}) | del(.[$c]))' --arg c "$class"
+  workspace_config_rules | jq -e --arg c "$class" 'has($c)' >/dev/null && rule=1
+  [[ -n $desktop ]] && workspace_config_autostart | jq -e --arg d "$desktop" 'index($d) != null' >/dev/null && start=1
 
+  pattern=
+  ((rule)) && pattern="^[[:space:]]*o\.window\(\"$(sed 's/[][\\.*^$|?+(){}]/\\&/g' <<<"$class")\","
+  ((start)) && pattern="${pattern:+$pattern|}^[[:space:]]*o\.launch_on_start\(\"$(sed 's/[][\\.*^$|?+(){}]/\\&/g' <<<"$desktop")\"\)"
   for file in "$HYPR_DIR"/*.lua; do
+    [[ -n $pattern ]] || break
     [[ -f $file ]] || continue
     [[ $file == "$MANAGED_LUA" ]] && continue
-    read_file "$file" | grep -qE "^[[:space:]]*o\.window\(\"$(sed 's/[][\\.*^$|?+(){}]/\\&/g' <<<"$class")\",|^[[:space:]]*o\.launch_on_start\(\"$(sed 's/[][\\.*^$|?+(){}]/\\&/g' <<<"$desktop")\"\)" || continue
+    read_file "$file" | grep -qE "$pattern" || continue
 
-    previous=$(read_file "$file")
-    backup_once "$file"
-
-    awk -v class="$class" -v desktop="$desktop" '
-      (index($0, "o.window(\"" class "\",") && $0 ~ /^[ \t]*o\.window\(/) \
-      || (desktop != "" && index($0, "o.launch_on_start(\"" desktop "\")") && $0 ~ /^[ \t]*o\.launch_on_start\(/) {
+    next=$(workspace_edit_theirs "$file" -v class="$class" -v desktop="$desktop" -v rule="$rule" -v start="$start" '
+      (rule && index($0, "o.window(\"" class "\",") && $0 ~ /^[ \t]*o\.window\(/ \
+         && $0 ~ /[{,][ \t]*(workspace|float|fullscreen|pin|monitor|no_initial_focus|idle_inhibit|no_screen_share)[ \t]*=/) \
+      || (start && desktop != "" && index($0, "o.launch_on_start(\"" desktop "\")") && $0 ~ /^[ \t]*o\.launch_on_start\(/) {
         print "-- " $0
         print "-- ^ removed in OmaSettings; delete the dashes to bring it back."
         next
       }
       { print }
-    ' <(read_file "$file") | write_file "$file" managed
-
-    if ! capture luac -p "$file" >/dev/null; then
-      printf '%s' "$previous" | write_file "$file" managed
-      die "removing that rule would have broken $(basename "$file"), so nothing changed"
-    fi
+    ' && printf x) || exit 1
+    [[ ${#next} -gt 1 ]] || continue
+    files+=("$file"); nexts+=("${next%x}")
+  done
+  for i in "${!files[@]}"; do
+    printf '%s' "${nexts[i]}" | write_file "${files[i]}" managed \
+      || die "could not write $(basename "${files[i]}")"
   done
 
+  edit_store '.windowRules = ((.windowRules // {}) | del(.[$c]))' --arg c "$class"
   hyprctl reload >/dev/null 2>&1 || true
 }
 

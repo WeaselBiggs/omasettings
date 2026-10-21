@@ -136,7 +136,6 @@ ensure_regular_file() {
 write_file() {
   local file=$1 managed=${2:-} tmp target
   ensure_regular_file "$file" || return 1
-  [[ -n $managed ]] || backup_once "$file" || return 1
   # A config symlinked into a dotfiles repo is a config, not a redirect to
   # refuse: the rename lands on what the link points at, so the link survives
   # and the repo sees the change. The resolved path has to be a regular file
@@ -145,6 +144,12 @@ write_file() {
   mkdir -p "$(dirname "$target")"
   tmp=$(mktemp "$target.omasettings.XXXXXX") || return 1
   cat >"$tmp" || { rm -f "$tmp"; return 1; }
+  # Identical content is not a write: Hyprland reloads the managed file the
+  # moment it is replaced, and every store edit re-renders it, so a tmux
+  # toggle would otherwise cost a compositor reload. Decided before the
+  # backup, so a file left as it was does not acquire one.
+  if [[ -f $target ]] && cmp -s "$tmp" "$target"; then rm -f "$tmp"; return 0; fi
+  [[ -n $managed ]] || backup_once "$file" || { rm -f "$tmp"; return 1; }
   chmod --reference="$target" "$tmp" 2>/dev/null
   mv "$tmp" "$target"
 }

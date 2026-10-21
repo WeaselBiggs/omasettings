@@ -8,7 +8,7 @@ compose_entries() {
   read_file "$XCOMPOSE" | grep -E '^[[:space:]]*<[^#]*:' \
     | jq -Rn '[inputs
         | capture("^\\s*(?<keys>(<[^>]+>\\s*)+)\\s*:\\s*\"(?<text>([^\"\\\\]|\\\\.)*)\"(\\s*(?<name>\\S+))?\\s*$")
-        | { keys: (.keys | gsub("\\s+$"; "")), text: .text, name: (.name // "") }]' 2>/dev/null \
+        | { keys: (.keys | gsub("\\s+$"; "")), text: (.text | gsub("\\\\(?<c>.)"; .c)), name: (.name // "") }]' 2>/dev/null \
     || echo '[]'
 }
 
@@ -16,6 +16,7 @@ compose_add() {
   local keys=$1 text=$2
   [[ -n $keys && -n $text ]] || die "compose add needs both a key sequence and a result"
   [[ $keys == *"<"* ]] || die "key sequence must look like '<Multi_key> <a> <b>'"
+  [[ $keys != *$'\n'* && $text != *$'\n'* ]] || die "a compose sequence must be a single line"
 
   # A file that does not include the system rules yet needs the include line
   # first, or adding one sequence silently drops every default one.
@@ -23,13 +24,20 @@ compose_add() {
     write_file "$XCOMPOSE" <<<'include "%L"'
   elif ! read_file "$XCOMPOSE" | grep -q '^include '; then
     backup_once "$XCOMPOSE"
-    printf 'include "%%L"\n%s' "$(read_file "$XCOMPOSE")" | write_file "$XCOMPOSE"
+    printf 'include "%%L"\n%s\n' "$(read_file "$XCOMPOSE")" | write_file "$XCOMPOSE"
   fi
 
   compose_remove "$keys" quiet
   ensure_regular_file "$XCOMPOSE" || die "$XCOMPOSE is not a file this can write"
   backup_once "$XCOMPOSE" || die "could not back up $XCOMPOSE"
-  printf '%s : "%s"\n' "$keys" "$text" >>"$XCOMPOSE"
+  # A file whose last line has no newline would glue the new sequence onto it,
+  # and both would be lost.
+  [[ ! -s $XCOMPOSE || $(tail -c1 "$XCOMPOSE" | od -An -c | tr -d ' ') == '\n' ]] || printf '\n' >>"$XCOMPOSE"
+  # The result is a C-style string literal: a quote or a backslash written
+  # bare ends the string early, and libX11 drops the line without a word.
+  local esc=${text//\\/\\\\}
+  esc=${esc//\"/\\\"}
+  printf '%s : "%s"\n' "$keys" "$esc" >>"$XCOMPOSE"
 }
 
 compose_remove() {

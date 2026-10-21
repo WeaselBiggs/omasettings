@@ -39,6 +39,13 @@ Item {
 
   property var navController: null
 
+  // Told, not asked, the same as SettingRow: the window has to be handed
+  // the block or it keeps reading Escape as "close" under a half-typed
+  // passphrase.
+  onNavBlockingChanged: {
+    if (navController && navController.setNavBlocked !== undefined) navController.setNavBlocked(nav, navBlocking)
+  }
+
   function findController() {
     var node = nav.parent
     while (node) {
@@ -53,9 +60,17 @@ Item {
   Component.onCompleted: {
     nav.navController = findController()
     if (nav.navController) nav.navController.registerNavRow(nav)
+    // A row rebuilt while it already holds the keys (the Wi-Fi list under
+    // an open prompt) had no controller when navBlocking was first set, so
+    // the block is told again now that there is one to tell.
+    if (nav.navBlocking && nav.navController && nav.navController.setNavBlocked !== undefined)
+      nav.navController.setNavBlocked(nav, true)
   }
 
   Component.onDestruction: {
+    // The Wi-Fi list is rebuilt every few seconds, so a row can go while it
+    // holds the keyboard; left behind, the block would eat every key.
+    if (nav.navController && nav.navController.setNavBlocked !== undefined) nav.navController.setNavBlocked(nav, false)
     if (nav.navController) nav.navController.unregisterNavRow(nav)
   }
 

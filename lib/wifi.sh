@@ -10,8 +10,11 @@ wifi_device() {
     | awk -F: '$2 == "wifi" { print $1; exit }'
 }
 
+# Raw names rather than escaped ones, so a saved SSID with a colon in it
+# matches what wifi_networks reports; TYPE never holds a colon, so splitting
+# on the last one is still safe.
 wifi_saved() {
-  capture nmcli -t -f NAME,TYPE con show \
+  capture nmcli -t -e no -f NAME,TYPE con show \
     | awk -F: '$NF ~ /wireless/ { name = $0; sub(/:[^:]*$/, "", name); print name }'
 }
 
@@ -102,7 +105,8 @@ wifi_state() {
     --argjson band "${band:-{\}}" \
     '{ available: $available, enabled: $enabled, device: $device, networks: $networks,
        connection: $connection, band: $band,
-       connected: (($networks[] | select(.active) | .ssid) // "") }'
+       # Two radios can each be on a network; one name is still the answer.
+       connected: (first($networks[] | select(.active) | .ssid) // "") }'
 }
 
 wifi_cmd() {

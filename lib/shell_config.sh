@@ -10,8 +10,16 @@ read_shell_json() {
 edit_shell_json() {
   local filter=$1
   shift
-  local next
-  next=$(jq "$filter" "$@" <<<"$(read_shell_json)") || die "failed to update $SHELL_JSON"
+  local current next
+  # The empty-document fallback is for readers. A read-modify-write that
+  # starts from {} because the file would not parse writes back only its own
+  # key, and the bar layout and every widget's settings go with the rest.
+  if [[ -s $SHELL_JSON ]]; then
+    current=$(read_file "$SHELL_JSON" | jq -c .) || die "$SHELL_JSON is not valid JSON; leaving it alone"
+  else
+    current='{}'
+  fi
+  next=$(jq "$filter" "$@" <<<"$current") || die "failed to update $SHELL_JSON"
   write_file "$SHELL_JSON" <<<"$next" || die "failed to write $SHELL_JSON"
 }
 

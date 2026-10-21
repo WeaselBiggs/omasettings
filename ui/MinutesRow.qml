@@ -3,16 +3,19 @@ import qs.Commons
 import qs.Ui
 import "." as Local
 
-// A duration stored in seconds but edited in whole minutes.
+// A duration stored in seconds but edited in whole minutes. Zero is off —
+// that is what Omarchy's idle service makes of it — so the row shows and
+// sets it rather than reading it as a minute and switching the timeout on at
+// the first nudge.
 SettingRow {
   id: minutesRow
   property int seconds: 0
   signal committed(int mins)
 
-  readonly property int currentMinutes: Math.max(1, Math.round(seconds / 60))
+  readonly property int currentMinutes: seconds <= 0 ? 0 : Math.max(1, Math.round(seconds / 60))
   readonly property int shownMinutes: minutesSlider.dragging ? Math.round(minutesSlider.liveValue) : effective
 
-  // The slider runs 1..60 whole minutes, so a key press is a minute, and each
+  // The slider runs 0..60 whole minutes, so a key press is a minute, and each
   // press builds on the last rather than on the value last read back — as does
   // a drag, which is what keeps the handle where it was put while the write
   // makes its way back through the state.
@@ -32,7 +35,7 @@ SettingRow {
   navKeys: [{ key: "\u2190\u2192", label: "Adjust" }]
 
   function commit(next) {
-    var wanted = Math.max(1, Math.min(60, Math.round(next)))
+    var wanted = Math.max(0, Math.min(60, Math.round(next)))
     if (wanted === minutesRow.effective) return
     minutesRow.pending = wanted
     minutesRow.basis = minutesRow.currentMinutes
@@ -54,7 +57,7 @@ SettingRow {
       anchors.verticalCenter: parent.verticalCenter
       integer: true
       step: 1
-      minimum: 1
+      minimum: 0
       maximum: 60
       value: minutesRow.effective
       onReleased: function(v) { minutesRow.commit(v) }
@@ -66,7 +69,8 @@ SettingRow {
       anchors.verticalCenter: parent.verticalCenter
       width: Style.space(76)
       horizontalAlignment: Text.AlignRight
-      text: minutesRow.shownMinutes + (minutesRow.shownMinutes === 1 ? " min" : " mins")
+      text: minutesRow.shownMinutes === 0 ? "Off"
+        : minutesRow.shownMinutes + (minutesRow.shownMinutes === 1 ? " min" : " mins")
       color: Local.Palette.muted
       font.family: Local.Palette.fontFamily
       font.pixelSize: Style.font.caption

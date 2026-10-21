@@ -89,12 +89,24 @@ audio_watch() {
   command -v pactl >/dev/null 2>&1 || { echo '{"available": false}'; return; }
 
   audio_state
-  pactl subscribe 2>/dev/null \
-    | grep --line-buffered -E "on (sink|source|server)" \
+
+  local reader=$$
+  {
+    local pid
+    # The subscription outlives nothing: when this subshell goes, so does it.
+    trap 'kill "$pid" 2>/dev/null' EXIT
+    pactl subscribe 2>/dev/null & pid=$!
+
+    # Closing the page only signals the top-level process; the pipeline
+    # behind it would otherwise live on until the next sink event it tried
+    # to forward. Watch for the reader instead, as power_watch does.
+    while kill -0 "$reader" 2>/dev/null; do sleep 2; done
+  } | grep --line-buffered -E "on (sink|source|server)" \
     | while read -r _; do
         # A single key press emits several events; draining the burst first
         # means one state read per change rather than four.
         while read -r -t 0.1 _; do :; done
+        kill -0 "$reader" 2>/dev/null || break
         audio_state
       done
 }

@@ -88,12 +88,17 @@ Ui.SectionBody {
       }
 
       // "3840x2160@60.00" is how Hyprland says it; nobody reads it that way.
+      // A whole-number rate drops its decimals; 59.94 keeps them, or it and
+      // 60.00 would be two rows reading the same.
       function readable(mode) {
         if (mode === "preferred" || mode === "") return "Preferred"
         var parts = String(mode).split("@")
         var size = parts[0].split("x")
-        return size[0] + "×" + size[1]
-          + (parts.length > 1 ? "  ·  " + Math.round(Number(parts[1])) + " Hz" : "")
+        var hz = ""
+        var rate = parts.length > 1 ? Number(parts[1]) : 0
+        if (parts.length > 1)
+          hz = "  ·  " + (Math.abs(rate - Math.round(rate)) < 0.005 ? String(Math.round(rate)) : rate.toFixed(2)) + " Hz"
+        return size[0] + "×" + size[1] + hz
       }
     }
   }

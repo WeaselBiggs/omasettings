@@ -7,8 +7,13 @@
 
 POWERPROFILES_STATE="${OMARCHY_POWERPROFILES_STATE_DIR:-${XDG_STATE_HOME:-$HOME_DIR/.local/state}/omarchy/powerprofiles}"
 
+# Every system battery, whatever the firmware called it: BAT0, BAT1, CMB0.
+# A headset or a mouse is a battery too, but not one the machine runs on.
 power_battery_device() {
-  capture upower -e | grep -m1 'BAT'
+  local d
+  for d in $(capture upower -e | grep '/battery_'); do
+    capture upower -i "$d" | grep -qE '^\s+power supply:\s+yes' && printf '%s\n' "$d"
+  done
 }
 
 # upower's own report, reduced to the handful of facts worth showing.
@@ -40,8 +45,17 @@ power_state() {
 
   command -v powerprofilesctl >/dev/null 2>&1 || { echo '{"available": false}'; return; }
 
-  device=$(power_battery_device)
-  reading=$(power_battery_reading "$device")
+  device=$(power_battery_device | head -n1)
+  # Charge, state and time come from UPower's aggregate, which already sums a
+  # second pack and is what the bar reads; health is per pack, and the
+  # aggregate has none, so that one fact is taken from the first pack.
+  if [[ -n $device ]]; then
+    reading=$(power_battery_reading /org/freedesktop/UPower/devices/DisplayDevice)
+    [[ $(jq '.percentage' <<<"${reading:-{\}}") == null ]] && reading=$(power_battery_reading "$device")
+    reading=$(jq -c --argjson pack "$(power_battery_reading "$device")" '.health = $pack.health' <<<"$reading")
+  else
+    reading='{}'
+  fi
   profiles=$(capture omarchy-powerprofiles-list | jq -R -s -c 'split("\n") | map(select(length > 0))')
   current=$(capture powerprofilesctl get)
   onbattery=$(busctl get-property org.freedesktop.UPower /org/freedesktop/UPower org.freedesktop.UPower OnBattery 2>/dev/null)
@@ -112,8 +126,16 @@ power_cmd() {
     profile)
       [[ $source == ac || $source == battery ]] || die "expected ac or battery"
       [[ -n $profile ]] || die "no profile given"
+      local now=ac live
+      [[ $(busctl get-property org.freedesktop.UPower /org/freedesktop/UPower org.freedesktop.UPower OnBattery 2>/dev/null) == "b true" ]] && now=battery
+      live=$(capture powerprofilesctl get)
       omarchy-powerprofiles-set "$source" "$profile" >/dev/null 2>&1 \
-        || die "could not set the $source profile to $profile" ;;
+        || die "could not set the $source profile to $profile"
+      # The helper applies whatever it saves, whichever source it is for; a
+      # profile remembered for the other source must not change what runs now.
+      if [[ $source != "$now" && -n $live ]]; then
+        powerprofilesctl set "$live" >/dev/null 2>&1 || true
+      fi ;;
     *) die "unknown battery action '$action'" ;;
   esac
 }

@@ -12,7 +12,14 @@ edit_store() {
   local filter=$1
   shift
   local current next
-  current=$(read_store)
+  # Not read_store: its {} fallback is right for a reader and wrong here, where
+  # a store that would not parse would be replaced by the one edit and the
+  # managed Lua re-rendered empty.
+  if [[ -s $STORE ]]; then
+    current=$(read_file "$STORE" | jq -c .) || die "$STORE is not valid JSON; leaving it alone"
+  else
+    current='{}'
+  fi
   next=$(jq -c "$filter" "$@" <<<"$current") || die "failed to update $STORE"
   write_file "$STORE" managed <<<"$next" || die "failed to write $STORE"
   render_managed

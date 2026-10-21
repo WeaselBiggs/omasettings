@@ -34,7 +34,7 @@ tmux_read() {
       tmux show-options -s 2>/dev/null
       tmux show-options -g 2>/dev/null
       tmux show-options -gw 2>/dev/null
-    } | awk '{ key = $1; $1 = ""; sub(/^ /, ""); gsub(/^"|"$/, "", $0); printf "%s\t%s\n", key, $0 }'
+    } | awk '{ key = $1; $1 = ""; sub(/^ /, ""); gsub(/^["\x27]|["\x27]$/, "", $0); printf "%s\t%s\n", key, $0 }'
   else
     [[ -f $TMUX_CONFIG ]] || return 0
     awk '
@@ -48,7 +48,9 @@ tmux_read() {
         key = $i
         value = ""
         for (j = i + 1; j <= NF; j++) value = value (value == "" ? "" : " ") $j
-        gsub(/^"|"$/, "", value)
+        # Either quoting style is common in a tmux.conf; the server itself
+        # only ever prints double quotes.
+        gsub(/^["\x27]|["\x27]$/, "", value)
         printf "%s\t%s\n", key, trim(value)
       }
     ' <(read_file "$TMUX_CONFIG")
@@ -100,6 +102,9 @@ tmux_write() {
   ensure_regular_file "$TMUX_CONFIG" || die "$TMUX_CONFIG is not a file this can write"
   backup_once "$TMUX_CONFIG"
 
+  local previous
+  previous=$(read_file "$TMUX_CONFIG")
+
   local setter="set -g"
   [[ $scope == window ]] && setter="setw -g"
 
@@ -125,12 +130,16 @@ tmux_write() {
     }
   ' <(read_file "$TMUX_CONFIG") | write_file "$TMUX_CONFIG" managed
 
-  # A running server takes the change immediately; without one the file is
-  # enough, since tmux reads it at start.
+  # A running server takes the change immediately, and is also the only
+  # validator there is: a value it refuses would otherwise sit in the file
+  # and fail every later start, so the file goes back to what it was. Without
+  # a server the file is enough, since tmux reads it at start.
   if tmux has-session 2>/dev/null; then
-    local flag="-g"
+    local flag="-g" report
     [[ $scope == window ]] && flag="-gw"
-    tmux set-option $flag "$key" "$formatted" >/dev/null 2>&1 \
-      || die "tmux rejected $key = $formatted"
+    if ! report=$(capture_err tmux set-option $flag "$key" "$formatted"); then
+      printf '%s\n' "$previous" | write_file "$TMUX_CONFIG" managed
+      die "tmux rejected $key = $formatted, so it was rolled back${report:+: $report}"
+    fi
   fi
 }

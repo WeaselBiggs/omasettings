@@ -55,7 +55,13 @@ herdr_read() {
     /=/ {
       key = trim(substr($0, 1, index($0, "=") - 1))
       value = trim(substr($0, index($0, "=") + 1))
-      sub(/[ \t]+#.*$/, "", value)
+      # A "#" inside a quoted string is text, not a comment: the comment
+      # strip only applies past the closing quote, or to an unquoted value.
+      if (value ~ /^"/) {
+        if (match(value, /^"([^"\\]|\\.)*"/)) value = substr(value, 1, RLENGTH)
+      } else {
+        sub(/[ \t]+#.*$/, "", value)
+      }
       if (key == "" || value ~ /^[\[{]/) next
       full = (section == "" ? key : section "." key)
       # Strings arrive quoted; the window wants the text, not the quoting.

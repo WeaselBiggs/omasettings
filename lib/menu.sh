@@ -47,6 +47,10 @@ BEGIN { inStr = 0; inBlock = 0; held = "" }
   # one line is held back until the next one says.
   first = out
   sub(/^[ \t\r]+/, "", first)
+  # A line with nothing left on it says nothing about the comma either way,
+  # so it must not take the held line's place: a comment or a blank between a
+  # trailing comma and its closer would otherwise leave the comma in.
+  if (first == "") next
   if (first ~ /^[}\]]/) sub(/,[ \t\r]*$/, "", held)
   flush(out)
 }

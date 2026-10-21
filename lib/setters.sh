@@ -119,10 +119,34 @@ set_key() {
     # a mark that cannot be cleared.
     after=$(setting_value_now "$key")
     track_write "$key" "${after:-$value}" "$before"
+    # Back to what it was is a reset by another route, and a display's rule
+    # must go with it (see setting_reset) or the mode filled in to complete
+    # it stays behind, pinning the display with no mark to say so. Only then:
+    # a change that still stands was applied once already, and settling it
+    # again would rebuild and re-apply the same rule.
+    if [[ $key == monitor:*:* ]] \
+        && ! jq -e --arg k "$key" '(.written // {}) | has($k)' <<<"$(read_store)" >/dev/null; then
+      monitor_settle "$key"
+    fi
     return
   fi
 
   set_key_apply "$key" "$value"
+}
+
+# A display keeps no record of its own once it is back to what it was. The
+# rule goes with the last setting on it, and not before: what is left in
+# there is the mode or scale filled in to keep the rule complete, which
+# nobody asked for and which would go on overriding their config.
+monitor_settle() {
+  local rest=${1#monitor:} display
+  display=${rest%:*}
+  if jq -e --arg n "$display" '(.written // {}) | keys | any(startswith("monitor:" + $n + ":"))' \
+       <<<"$(read_store)" >/dev/null; then
+    monitor_unset "$display" "${rest##*:}"
+  else
+    monitor_forget "$display"
+  fi
 }
 
 set_key_apply() {
@@ -200,8 +224,19 @@ plugin_cmd() {
   [[ $action == self-check ]] && { self_check; return; }
   [[ -n $id ]] || die "no plugin id given"
   case $action in
-    enable) omarchy plugin enable "$id" ;;
-    disable) omarchy plugin disable "$id" ;;
+    # A bar widget keeps its settings in its layout entry, and Omarchy's
+    # disable drops the entry whole — and, for a clone, puts the source widget
+    # back in the clone's place, working from the shell's in-memory copy of
+    # the config, which may not yet have seen a write of ours. So a widget
+    # that is in the bar goes through the Bar page's door, stash and all, and
+    # Omarchy's call is left for what is not a bar entry: the service and
+    # overlay kinds, and a widget sitting in plugins[]. bar_enable already
+    # falls through to Omarchy's enable for a widget this window never
+    # switched off.
+    enable) bar_enable "$id" ;;
+    disable)
+      if [[ -n $(bar_widget_section "$id") ]]; then bar_disable "$id"
+      else omarchy plugin disable "$id"; fi ;;
     # Removal asks for confirmation and prints what it deleted, so it belongs
     # in a terminal of its own — and one that outlives this window.
     remove)
@@ -250,6 +285,9 @@ setting_reset() {
       [[ -n $k ]] || continue
       setting_reset "$k"
     done < <(devices_changed | jq -r '.[]')
+    # The two extras are marked changed with the rest, so the one-click reset
+    # has to take them too; hypr_reset's reload applies the re-rendered file.
+    edit_store 'del(.extras)'
     hypr_reset --all
     return
   fi
@@ -268,25 +306,28 @@ setting_reset() {
   fi
 
   if setting_tracked "$key"; then
-    local original
-    original=$(jq -r --arg k "$key" '(.written // {}) | if has($k) then .[$k] else empty end' <<<"$(read_store)")
-    [[ -n $original ]] || return 0
-    setting_write "$key" "$original"
-    edit_store 'if .written then .written |= del(.[$k]) else . end' --arg k "$key"
-    # A display keeps no record of its own once it is back to what it was. The
-    # rule goes with the last setting on it, and not before: what is left in
-    # there is the mode or scale filled in to keep the rule complete, which
-    # nobody asked for and which would go on overriding their config.
-    if [[ $key == monitor:*:* ]]; then
-      local rest=${key#monitor:} display
-      display=${rest%:*}
-      if jq -e --arg n "$display" '(.written // {}) | keys | any(startswith("monitor:" + $n + ":"))' \
-           <<<"$(read_store)" >/dev/null; then
-        monitor_unset "$display" "${rest##*:}"
-      else
-        monitor_forget "$display"
-      fi
+    local store original
+    store=$(read_store)
+    # Presence, not emptiness: an original recorded as "" (no idle block, no
+    # centre anchor, Neovim's empty colorcolumn) is still a record, and a
+    # reset that bailed on it left the mark on for good.
+    jq -e --arg k "$key" '(.written // {}) | has($k)' <<<"$store" >/dev/null || return 0
+    original=$(jq -r --arg k "$key" '.written[$k]' <<<"$store")
+    if [[ -n $original ]]; then
+      setting_write "$key" "$original"
+    else
+      # Nothing to write back, so the key goes the way it came: the writers
+      # that refuse an empty value get the field deleted instead.
+      case $key in
+        idle-screensaver|idle-lock)
+          edit_shell_json 'if .idle then .idle |= del(.[$f]) else . end' --arg f "${key#idle-}" ;;
+        bar-center-anchor)
+          edit_shell_json 'if .bar then .bar |= del(.centerAnchor) else . end' ;;
+        nvim:*|herdr:*) setting_write "$key" "" ;;
+      esac
     fi
+    edit_store 'if .written then .written |= del(.[$k]) else . end' --arg k "$key"
+    if [[ $key == monitor:*:* ]]; then monitor_settle "$key"; fi
     return
   fi
 

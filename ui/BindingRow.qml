@@ -29,7 +29,7 @@ Item {
     navKeys: bindingRow.mine ? [{ key: "Space", label: "Remove" }]
       : [{ key: "Space", label: bindingRow.off ? "Restore" : "Turn off" }]
     onNavActivate: {
-      if (bindingRow.mine) bindingRow.removeRequested()
+      if (bindingRow.mine || bindingRow.off) bindingRow.removeRequested()
       else bindingRow.disableRequested()
     }
   }

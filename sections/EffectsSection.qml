@@ -59,6 +59,8 @@ Ui.SectionBody {
       enabled: blurOn
       minimum: 0
       maximum: 0.2
+      // Hyprland's default is 0.0117; a 0.05 step could never land on it.
+      step: 0.005
       value: app.hyprValue("blur-noise", 0.02)
       onCommitted: function(next) { app.setHypr("blur-noise", next) }
       changed: app.isChanged("blur-noise")

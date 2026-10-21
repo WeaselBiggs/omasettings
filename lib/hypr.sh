@@ -406,7 +406,11 @@ hypr_set() {
   local json
   if [[ $type == bool ]]; then json=$value
   elif [[ $type == str ]]; then json=$(jq -Rn --arg v "$value" '$v')
-  else json=$value
+  # The pages send a number as fixed-point text ("0.40", "2.00") while
+  # hypr_read yields 0.4 and 2, and jq keeps a literal as written — so the
+  # number is canonicalised here, or a slider put back where it started is
+  # stored as a change it cannot clear.
+  else json=$(jq -cn --arg v "$value" '($v | tonumber) + 0')
   fi
 
   # What the setting was before this window first wrote it. Kept so that
@@ -425,7 +429,9 @@ hypr_set() {
     original=${original:-null}
   fi
 
-  if [[ $json == "$original" ]]; then
+  # Numbers are compared as numbers: the text forms of 2 and 2.0 differ.
+  if [[ $json == "$original" ]] || { [[ $type != str && $type != bool ]] \
+       && jq -en --argjson a "$json" --argjson b "$original" '$a == $b' >/dev/null; }; then
     edit_store 'if .hypr then .hypr |= del(.[$key]) else . end
       | if .hyprOriginal then .hyprOriginal |= del(.[$key]) else . end' --arg key "$key"
     # Hyprland has no way to unset a keyword, so the value comes back the same
@@ -462,7 +468,9 @@ hypr_reset() {
   [[ -n $key ]] || die "no setting given"
 
   if [[ $key == --all ]]; then
-    edit_store '.hypr = {} | .hyprOriginal = {}'
+    # The extras ride along: the dialog counted them among the settings it
+    # promised to put back, and the one re-render drops their Lua too.
+    edit_store '.hypr = {} | .hyprOriginal = {} | .extras = {}'
   else
     hypr_keyword "$key" >/dev/null || die "unknown setting '$key'"
     jq -e --arg k "$key" '(.hypr // {}) | has($k)' <<<"$(read_store)" >/dev/null \
@@ -498,11 +506,18 @@ extras_changed() {
 }
 
 extras_set() {
-  local key=$1 value=$2 default=$3
-  if [[ $value == "$default" ]]; then
+  local key=$1 value=$2 default=$3 json
+  # The speed arrives as fixed-point text ("1.00") against a default of 1, so
+  # the test is numeric where both sides are numbers — or putting the slider
+  # back is a change that never clears and the animation set stays written.
+  if jq -en --arg v "$value" --arg d "$default" \
+       '($v == $d) or (($v | tonumber?) == ($d | tonumber?))' >/dev/null; then
     edit_store 'if .extras then .extras |= del(.[$k]) else . end' --arg k "$key"
   else
-    edit_store '.extras = ((.extras // {}) | .[$k] = $v)' --arg k "$key" --arg v "$value"
+    # A number is stored as one, canonicalised (1.50 -> 1.5), so a literal
+    # like "1.00" never reaches the compare above or the Lua below.
+    json=$(jq -cn --arg v "$value" '(($v | tonumber?) + 0) // $v')
+    edit_store '.extras = ((.extras // {}) | .[$k] = $v)' --arg k "$key" --argjson v "$json"
   fi
   hyprctl reload >/dev/null 2>&1 || true
 }
@@ -527,7 +542,8 @@ render_extras_lua() {
     echo 'o.window(".*", { opacity = "1.0 1.0" })'
   fi
 
-  [[ $speed == 1 || -z $speed ]] && return 0
+  # Numeric, for a speed already stored as "1.00".
+  [[ -z $speed ]] || awk -v s="$speed" 'BEGIN { exit !(s + 0 == 1) }' && return 0
   echo ""
   echo "-- Animation speed: Omarchy's own set, every speed multiplied by $speed."
   omarchy_animations | while read -r line; do

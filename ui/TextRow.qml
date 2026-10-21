@@ -35,7 +35,9 @@ SettingRow {
     if (clearOnCommit) {
       if (next === "") return
       textRow.committed(next)
-      field.text = ""
+      // Re-bound rather than assigned: an imperative write would detach the
+      // field from the value for good.
+      field.text = Qt.binding(function() { return textRow.value })
     } else if (next !== textRow.value) {
       textRow.committed(next)
     }
@@ -85,7 +87,10 @@ SettingRow {
         textRow.navStopEditing()
         event.accepted = true
       } else if (event.key === Qt.Key_Escape) {
-        text = textRow.value
+        // Assigning the value here would replace the binding, and the field
+        // would stop following resets and refreshes for the rest of the
+        // window's life.
+        text = Qt.binding(function() { return textRow.value })
         textRow.navStopEditing()
         event.accepted = true
       }

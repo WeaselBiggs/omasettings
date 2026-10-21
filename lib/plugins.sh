@@ -158,7 +158,7 @@ self_check() {
   [[ -d $repo/.git ]] || { self_update_state; return 0; }
 
   if GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -oBatchMode=yes}" \
-     git -C "$repo" fetch -q origin HEAD 2>/dev/null; then
+     timeout "$OMASETTINGS_FETCH_TIMEOUT" git -C "$repo" fetch -q origin HEAD 2>/dev/null; then
     behind=$(capture git -C "$repo" rev-list --count HEAD..FETCH_HEAD || echo 0)
   else
     behind=-2
