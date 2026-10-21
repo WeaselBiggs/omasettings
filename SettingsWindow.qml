@@ -1479,51 +1479,6 @@ Item {
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
             }
-
-            // The gap keeps the update from reading as part of the reset
-            // above it, so it is only there when both are showing.
-            Item {
-              Layout.preferredHeight: Style.space(6)
-              visible: !root.busy && root.loaded && root.selfBehind > 0 && root.changedSettings.length > 0
-            }
-
-            ColumnLayout {
-              Layout.fillWidth: true
-              visible: !root.busy && root.loaded && root.selfBehind > 0
-              spacing: Style.space(2)
-
-              Text {
-                textFormat: Text.PlainText
-                Layout.fillWidth: true
-                wrapMode: Text.WordWrap
-                text: "\uf0aa  Update available"
-                color: root.accent
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-
-              Text {
-                id: updateLink
-                textFormat: Text.PlainText
-                Layout.fillWidth: true
-                wrapMode: Text.WordWrap
-                text: root.selfBehind === 1 ? "1 commit behind · update"
-                  : root.selfBehind + " commits behind · update"
-                color: updateMouse.containsMouse ? root.accent : root.muted
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                font.underline: updateMouse.containsMouse
-
-                MouseArea {
-                  id: updateMouse
-                  anchors.fill: parent
-                  anchors.margins: -Style.space(4)
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: if (root.selfId !== "") root.run(["plugin", "update", root.selfId])
-                }
-              }
-            }
           }
         }
 
